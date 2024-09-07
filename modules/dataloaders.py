@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from torchvision import transforms
 from torch.utils.data import DataLoader
-from .datasets import IuxrayMultiImageDataset, MimiccxrSingleImageDataset
+from .datasets import IuxrayMultiImageDataset, MimiccxrSingleImageDataset,CT_RATE_MultiImageDataset
 
 
 class R2DataLoader(DataLoader):
@@ -32,8 +32,10 @@ class R2DataLoader(DataLoader):
 
         if self.dataset_name == 'iu_xray':
             self.dataset = IuxrayMultiImageDataset(self.args, self.tokenizer, self.split, transform=self.transform)
-        else:
+        elif self.dataset_name == 'mimic_cxr':
             self.dataset = MimiccxrSingleImageDataset(self.args, self.tokenizer, self.split, transform=self.transform)
+        elif self.dataset_name == 'CT_RATE':
+            self.dataset = CT_RATE_MultiImageDataset(self.args, self.tokenizer, self.split, transform=self.transform)
 
         self.init_kwargs = {
             'dataset': self.dataset,

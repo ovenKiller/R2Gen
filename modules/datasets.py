@@ -40,8 +40,32 @@ class IuxrayMultiImageDataset(BaseDataset):
         seq_length = len(report_ids)
         sample = (image_id, image, report_ids, report_masks, seq_length)
         return sample
-
-
+class CT_RATE_MultiImageDataset(BaseDataset):
+    def __getitem__(self, idx):
+        example = self.examples[idx]
+        image_id = example['id']
+        image_paths = example['images']  # 这里是一个包含多个图片路径的列表
+        split = example['split']
+        # 加载所有图片并应用转换
+        images = []
+        for img_path in image_paths:
+            filePath = os.path.join(self.image_dir, split)
+            filePath = os.path.join(filePath, img_path)
+            image = Image.open(filePath).convert('RGB')
+            if self.transform is not None:
+                image = self.transform(image)
+            images.append(image)
+        
+        # 将所有图片堆叠成一个张量
+        images_tensor = torch.stack(images, 0)  # 维度为 (num_images, C, H, W)
+        
+        report_ids = example['ids']
+        report_masks = example['mask']
+        seq_length = len(report_ids)
+        
+        # 返回的样本包括多个图片
+        sample = (image_id, images_tensor, report_ids, report_masks, seq_length)
+        return sample
 class MimiccxrSingleImageDataset(BaseDataset):
     def __getitem__(self, idx):
         example = self.examples[idx]

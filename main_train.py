@@ -18,7 +18,7 @@ def parse_agrs():
     parser.add_argument('--ann_path', type=str, default='data/iu_xray/annotation.json', help='the path to the directory containing the data.')
 
     # Data loader settings
-    parser.add_argument('--dataset_name', type=str, default='iu_xray', choices=['iu_xray', 'mimic_cxr'], help='the dataset to be used.')
+    parser.add_argument('--dataset_name', type=str, default='iu_xray', choices=['iu_xray', 'mimic_cxr','CT_RATE'], help='the dataset to be used.')
     parser.add_argument('--max_seq_length', type=int, default=60, help='the maximum sequence length of the reports.')
     parser.add_argument('--threshold', type=int, default=3, help='the cut off frequency for the words.')
     parser.add_argument('--num_workers', type=int, default=2, help='the number of workers for dataloader.')
@@ -77,11 +77,11 @@ def parse_agrs():
     parser.add_argument('--lr_scheduler', type=str, default='StepLR', help='the type of the learning rate scheduler.')
     parser.add_argument('--step_size', type=int, default=50, help='the step size of the learning rate scheduler.')
     parser.add_argument('--gamma', type=float, default=0.1, help='the gamma of the learning rate scheduler.')
-
+    parser.add_argument('--debug', type=bool, default=True, help='.')
     # Others
     parser.add_argument('--seed', type=int, default=9233, help='.')
     parser.add_argument('--resume', type=str, help='whether to resume the training from existing checkpoints.')
-
+    parser.add_argument('--min_gpu_memory', type=int, default=0, help='the minimum gpu memory to be used.')
     args = parser.parse_args()
     return args
 
@@ -98,11 +98,14 @@ def main():
 
     # create tokenizer
     tokenizer = Tokenizer(args)
-
-    # create data loader
     train_dataloader = R2DataLoader(args, tokenizer, split='train', shuffle=True)
-    val_dataloader = R2DataLoader(args, tokenizer, split='val', shuffle=False)
-    test_dataloader = R2DataLoader(args, tokenizer, split='test', shuffle=False)
+    if args.debug == False:
+    # create data loader
+        val_dataloader = R2DataLoader(args, tokenizer, split='val', shuffle=False)
+        test_dataloader = R2DataLoader(args, tokenizer, split='test', shuffle=False)
+    else:
+        val_dataloader = None
+        test_dataloader = None
 
     # build model architecture
     model = R2GenModel(args, tokenizer)

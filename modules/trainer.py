@@ -1,11 +1,11 @@
 import os
 from abc import abstractmethod
-
+from tqdm import tqdm  
 import time
 import torch
 import pandas as pd
 from numpy import inf
-
+import GPUtil
 
 class BaseTrainer(object):
     def __init__(self, model, criterion, metric_ftns, optimizer, args):
@@ -52,12 +52,10 @@ class BaseTrainer(object):
         not_improved_count = 0
         for epoch in range(self.start_epoch, self.epochs + 1):
             result = self._train_epoch(epoch)
-
             # save logged informations into log dict
             log = {'epoch': epoch}
             log.update(result)
             self._record_best(log)
-
             # print logged informations to the screen
             for key, value in log.items():
                 print('\t{:15s}: {}'.format(str(key), value))
@@ -189,7 +187,7 @@ class Trainer(BaseTrainer):
 
         train_loss = 0
         self.model.train()
-        for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(self.train_dataloader):
+        for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(tqdm(self.train_dataloader, desc="Training")):
             images, reports_ids, reports_masks = images.to(self.device), reports_ids.to(self.device), reports_masks.to(
                 self.device)
             output = self.model(images, reports_ids, mode='train')
@@ -204,7 +202,7 @@ class Trainer(BaseTrainer):
         self.model.eval()
         with torch.no_grad():
             val_gts, val_res = [], []
-            for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(self.val_dataloader):
+            for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(tqdm(self.val_dataloader, desc="Evaling")):
                 images, reports_ids, reports_masks = images.to(self.device), reports_ids.to(
                     self.device), reports_masks.to(self.device)
                 output = self.model(images, mode='sample')
@@ -219,7 +217,7 @@ class Trainer(BaseTrainer):
         self.model.eval()
         with torch.no_grad():
             test_gts, test_res = [], []
-            for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(self.test_dataloader):
+            for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(tqdm(self.test_dataloader,desc="Testing")):
                 images, reports_ids, reports_masks = images.to(self.device), reports_ids.to(
                     self.device), reports_masks.to(self.device)
                 output = self.model(images, mode='sample')
