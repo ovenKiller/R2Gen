@@ -3,7 +3,7 @@ import json
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-
+import random
 
 class BaseDataset(Dataset):
     def __init__(self, args, tokenizer, split, transform=None):
@@ -43,13 +43,14 @@ class IuxrayMultiImageDataset(BaseDataset):
 class CT_RATE_MultiImageDataset(BaseDataset):
     def __getitem__(self, idx):
         example = self.examples[idx]
-        image_id = example['id']
+        image_id = example['ids']
         image_paths = example['images']  # 这里是一个包含多个图片路径的列表
         split = example['split']
         # 加载所有图片并应用转换
         images = []
-        for img_path in image_paths:
-            filePath = os.path.join(self.image_dir, split)
+        # 原始数据集有48张图片。计算负担太大，这里只取其中的16张。
+        for img_path in image_paths[::3]:
+            filePath = os.path.join(self.image_dir, img_path.split('_')[0])
             filePath = os.path.join(filePath, img_path)
             image = Image.open(filePath).convert('RGB')
             if self.transform is not None:
@@ -57,14 +58,14 @@ class CT_RATE_MultiImageDataset(BaseDataset):
             images.append(image)
         
         # 将所有图片堆叠成一个张量
-        images_tensor = torch.stack(images, 0)  # 维度为 (num_images, C, H, W)
+        image = torch.stack(images, 0)  # 维度为 (num_images, C, H, W)
         
         report_ids = example['ids']
         report_masks = example['mask']
         seq_length = len(report_ids)
         
         # 返回的样本包括多个图片
-        sample = (image_id, images_tensor, report_ids, report_masks, seq_length)
+        sample = (image_id, image, report_ids, report_masks, seq_length)
         return sample
 class MimiccxrSingleImageDataset(BaseDataset):
     def __getitem__(self, idx):

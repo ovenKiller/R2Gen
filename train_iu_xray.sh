@@ -4,7 +4,7 @@ python main_train.py \
 --dataset_name iu_xray \
 --max_seq_length 60 \
 --threshold 3 \
---batch_size 2 \
+--batch_size 4 \
 --epochs 100 \
 --save_dir results/iu_xray \
 --step_size 50 \

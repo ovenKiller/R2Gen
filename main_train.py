@@ -8,7 +8,7 @@ from modules.optimizers import build_optimizer, build_lr_scheduler
 from modules.trainer import Trainer
 from modules.loss import compute_loss
 from models.r2gen import R2GenModel
-
+import GPUtil
 
 def parse_agrs():
     parser = argparse.ArgumentParser()
@@ -77,11 +77,14 @@ def parse_agrs():
     parser.add_argument('--lr_scheduler', type=str, default='StepLR', help='the type of the learning rate scheduler.')
     parser.add_argument('--step_size', type=int, default=50, help='the step size of the learning rate scheduler.')
     parser.add_argument('--gamma', type=float, default=0.1, help='the gamma of the learning rate scheduler.')
-    parser.add_argument('--debug', type=bool, default=True, help='.')
+    parser.add_argument('--debug', type=bool, default=False, help='.')
     # Others
     parser.add_argument('--seed', type=int, default=9233, help='.')
     parser.add_argument('--resume', type=str, help='whether to resume the training from existing checkpoints.')
-    parser.add_argument('--min_gpu_memory', type=int, default=1000, help='the minimum gpu memory to be used.')
+    parser.add_argument('--retry_interval', type=int, default=16, help='the retry interval.measured in seconds.')
+    parser.add_argument('--min_batch_size',type=int,default=2,help='the minimum batch size for training')
+    parser.add_argument('--max_batch_size',type=int,default=16,help='the maximum batch size for training')
+    
     args = parser.parse_args()
     return args
 
@@ -101,7 +104,7 @@ def main():
     train_dataloader = R2DataLoader(args, tokenizer, split='train', shuffle=True)
     if args.debug == False:
     # create data loader
-        val_dataloader = R2DataLoader(args, tokenizer, split='val', shuffle=False)
+        val_dataloader = R2DataLoader(args, tokenizer, split='valid', shuffle=False)
         test_dataloader = R2DataLoader(args, tokenizer, split='test', shuffle=False)
     else:
         val_dataloader = None
@@ -119,7 +122,7 @@ def main():
     lr_scheduler = build_lr_scheduler(args, optimizer)
 
     # build trainer and start to train
-    trainer = Trainer(model, criterion, metrics, optimizer, args, lr_scheduler, train_dataloader, val_dataloader, test_dataloader)
+    trainer = Trainer(model, criterion, metrics, optimizer, args, lr_scheduler, train_dataloader, val_dataloader, test_dataloader,tokenizer)
     trainer.train()
 
 

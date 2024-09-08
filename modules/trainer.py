@@ -8,8 +8,9 @@ import pandas as pd
 from numpy import inf
 import GPUtil
 import logging
-import gc
-
+import subprocess
+from modules.dataloaders import R2DataLoader
+from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetComputeRunningProcesses
 logger = logging.getLogger(__name__)
 if os.path.exists("logs") == False:
     os.makedirs("logs")
@@ -31,16 +32,104 @@ stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
 class BaseTrainer(object):
-    def __init__(self, model, criterion, metric_ftns, optimizer, args):
+    def create_train_set(self,batch_size):
+        self.args.batch_size = batch_size
+        return R2DataLoader(self.args, self.tokenizer, split='train', shuffle=True)
+    def fit_train_load(self): # 将batch_size以及使用GPU的数量设置为最佳，如果不能保证最低需求，此处会循环。
+        retry_interval = self.args.retry_interval 
+        # 将所有的GPU按照可用内存进行降序排序
+
+        
+        # 尝试加载尽量大的batch，确定dataloader
+        success = False
+        while(not success):
+            success = False
+            gpu_memory_avaliable = self.get_current_process_gpu_memory() # 当前进程已经使用的GPU
+            gpus = GPUtil.getGPUs()
+            for index, gpu in enumerate(gpus):
+                gpu_memory_avaliable[index] = gpu_memory_avaliable[index]+gpu.memoryFree
+                # 根据GPU的可用内存进行排序
+                sorted_gpu_ids = sorted(gpu_memory_avaliable, key=gpu_memory_avaliable.get, reverse=True)
+                self.device = "cuda:"+str(sorted_gpu_ids[0])
+            logger.info(f"Main GPU:{self.device}")
+            if isinstance(self.model, torch.nn.DataParallel):
+                self.model = self.model.module
+            
+            self.model.to(self.device)
+            batch_size = self.args.min_batch_size
+            try:
+                while(batch_size <= self.args.max_batch_size):
+                    self.train_dataloader = self.create_train_set(batch_size)
+                    images_id, images, reports_ids, reports_masks = next(iter(self.train_dataloader))
+                    images, reports_ids, reports_masks = images.to(self.device), reports_ids.to(self.device), reports_masks.to(
+                    self.device)
+                    output = self.model(images=images, targets=reports_ids, mode='train')
+                    loss = self.criterion(output, reports_ids, reports_masks)
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    success = True
+                    batch_size = batch_size * 2
+            except Exception as e: # 说明最后一次出错
+                batch_size = batch_size // 2
+                
+                self.train_dataloader = self.create_train_set(batch_size)
+                if success == False:
+                    logger.error(f"Error in with min_batch_size {batch_size*2}{e},sleep for {retry_interval} seconds")
+                    batch_size = self.args.min_batch_size
+                    time.sleep(retry_interval)
+        logger.info(f'batch:{batch_size}')
+        
+        # 尝试使用尽量多的显卡（小于ngpus设定）
+        self.avaliable_gpus = [sorted_gpu_ids[0]]
+        try:
+            while(len(self.avaliable_gpus)<self.args.n_gpu):
+                self.avaliable_gpus = self.avaliable_gpus + [sorted_gpu_ids[len(self.avaliable_gpus)]]
+                self.model = torch.nn.DataParallel(self.model, device_ids=self.avaliable_gpus)
+                images_id, images, reports_ids, reports_masks = next(iter(self.train_dataloader))
+                images, reports_ids, reports_masks = images.to(self.device), reports_ids.to(self.device), reports_masks.to(
+                self.device)
+                output = self.model(images=images, targets=reports_ids, mode='train')
+                loss = self.criterion(output, reports_ids, reports_masks)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+        except Exception as e:
+            self.avaliable_gpus.pop()
+            if len(self.avaliable_gpus) == 0:
+                self.avaliable_gpus = [sorted_gpu_ids[0]]
+                self.model = self.model.to(self.device)
+            else:
+                self.model = torch.nn.DataParallel(self.model, device_ids=self.avaliable_gpus)
+        logger.info(f"Avaliable GPUs:{self.avaliable_gpus}")
+    def get_current_process_gpu_memory(self):
+        nvmlInit()
+        # 当前进程 ID
+        current_pid = os.getpid()
+        # 获取 GPU 设备句柄 (假设使用 GPU 0)
+        usage = dict()
+        for i in range(4):
+            handle = nvmlDeviceGetHandleByIndex(i)
+            usage[i] = 0
+        # 获取运行在该设备上的所有进程
+            processes = nvmlDeviceGetComputeRunningProcesses(handle)
+        # 查找当前进程的 GPU 内存使用情况
+            for proc in processes:
+                if proc.pid == current_pid:
+                    mem_used = proc.usedGpuMemory / 1024 / 1024  # 转换为 MB
+                    usage[i] = mem_used
+        return usage  # 如果当前进程没有占用 GPU，返回 0
+
+    def __init__(self, model, criterion, metric_ftns, optimizer, args,tokenizer):
+        self.tokenizer = tokenizer
         self.args = args
-        # setup GPU device if available, move model into configured device
-        self.device, self.avaliable_gpus = self._prepare_device(args.n_gpu)
-        self.origin_model = model.to(self.device)
-        if len(self.avaliable_gpus) > 1:
-            self.model = torch.nn.DataParallel(self.origin_model, device_ids=self.avaliable_gpus)
+        self.model = model
+        # # setup GPU device if available, move model into configured device
+        # self.device, self.avaliable_gpus = self._prepare_device(args.n_gpu)
+        # self.origin_model = model.to(self.device)
+        # if len(self.avaliable_gpus) > 1:
+        #     self.model = torch.nn.DataParallel(self.origin_model, device_ids=self.avaliable_gpus)
         # 假设 self.model 是 DataParallel 包装的模型
-        for i, param in enumerate(self.model.parameters()):
-            logger.warning(f"Parameter {i} on device: {param.device}")
 
         self.criterion = criterion
         self.metric_ftns = metric_ftns
@@ -70,46 +159,24 @@ class BaseTrainer(object):
                               'test': {self.mnt_metric_test: self.mnt_best}}
 
     @abstractmethod
-    def _train_epoch(self, epoch,device):
+    def _train_epoch(self, epoch):
         raise NotImplementedError
 
     def train(self):
-        origin_retry_interval = 2
-        retry_interval = origin_retry_interval
+        retry_interval = self.args.retry_interval
+        # max_retry_interval = self.args.max_retry_interval
         not_improved_count = 0
         
         epoch = self.start_epoch
         while(epoch <= self.epochs):
             result = None
             try:
-                result = self._train_epoch(epoch,self.device)
-                # if flag is False and epoch ==5:
-                #     flag = True
-                #     a = 1/0
-                    
+                self.fit_train_load()
+                result = self._train_epoch(epoch)
             except Exception as e:
-                logger.error(f"Error in epoch {epoch},sleep for {retry_interval} seconds. {e}")
+                logger.error(f"Error in epoch {epoch}")
                 self._save_checkpoint(epoch, save_best=False)
-                del self.model
                 torch.cuda.empty_cache()
-                self.avaliable_gpus = []
-                while(len(self.avaliable_gpus) == 0):
-                    time.sleep(retry_interval)
-                    retry_interval = min(retry_interval * 2, 4)
-                    self.device, self.avaliable_gpus = self._prepare_device(self.args.n_gpu)
-                    logger.error(f"Retry to get device, current device: {self.device},avaliable_gpus: {self.avaliable_gpus}")
-                    if(len(self.avaliable_gpus) > 0):
-                        try:
-                            self._resume_checkpoint(os.path.join(self.checkpoint_dir, 'current_checkpoint.pth'))
-                            self.model = self.model.to(self.device)
-                            if len(self.avaliable_gpus) > 1:
-                                self.model = torch.nn.DataParallel(self.model, device_ids=self.avaliable_gpus).cuda()
-                        except Exception as e:
-                            logger.error(f"Resume failed: {e},sleep for {retry_interval} seconds")
-                            self.avaliable_gpus = []
-                retry_interval = origin_retry_interval
-                model_device = next(self.model.parameters()).device
-                logger.error(f"Resume success, current device: {model_device}")
                 continue
                 
             # save logged informations into log dict
@@ -170,21 +237,22 @@ class BaseTrainer(object):
         record_table = record_table.append(self.best_recorder['val'], ignore_index=True)
         record_table = record_table.append(self.best_recorder['test'], ignore_index=True)
         record_table.to_csv(record_path, index=False)
-
-    def _prepare_device(self, n_gpu_use):
-        gpus = GPUtil.getGPUs()
-        min_memory = self.args.min_gpu_memory
-        list_ids = []
-        device = "cpu"
-        for index, gpu in enumerate(gpus):
-            logger.info(f"GPU {index}: {gpu.memoryFree}MB")
-            if gpu.memoryFree > min_memory:
-                list_ids.append(index)
-                if len(list_ids) == n_gpu_use:
-                    break
-        if len(list_ids) > 0:
-            device = torch.device('cuda:{}'.format(list_ids[0]))
-        return device, list_ids
+        
+        
+    # def _prepare_device(self, n_gpu_use):
+    #     gpus = GPUtil.getGPUs()
+    #     min_memory = self.args.min_gpu_memory
+    #     list_ids = []
+    #     device = "cpu"
+    #     for index, gpu in enumerate(gpus):
+    #         logger.info(f"GPU {index}: {gpu.memoryFree}MB")
+    #         if gpu.memoryFree > min_memory:
+    #             list_ids.append(index)
+    #             if len(list_ids) == n_gpu_use:
+    #                 break
+    #     if len(list_ids) > 0:
+    #         device = torch.device('cuda:{}'.format(list_ids[0]))
+    #     return device, list_ids
 
     def _save_checkpoint(self, epoch, save_best=False):
         state = {
@@ -240,27 +308,24 @@ class BaseTrainer(object):
 
 class Trainer(BaseTrainer):
     def __init__(self, model, criterion, metric_ftns, optimizer, args, lr_scheduler, train_dataloader, val_dataloader,
-                 test_dataloader):
-        super(Trainer, self).__init__(model, criterion, metric_ftns, optimizer, args)
+                 test_dataloader,tokenizer):
+        super(Trainer, self).__init__(model, criterion, metric_ftns, optimizer, args,tokenizer)
+        self.args = args
         self.lr_scheduler = lr_scheduler
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.test_dataloader = test_dataloader
+        self.tokenizer = tokenizer
 
-    def _train_epoch(self, epoch,device):
+    def _train_epoch(self, epoch):
 
         train_loss = 0
         self.model.train()
-        exception_flag = False
         for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(tqdm(self.train_dataloader, desc="Training")):
-            if exception_flag is False and batch_idx == 5:
-                exception_flag = True
-                a = 1/0
-            
             images, reports_ids, reports_masks = images.to(self.device), reports_ids.to(self.device), reports_masks.to(
                 self.device)
-            logger.error(f"self.device For Data: {device}")
-            output = self.model(images, reports_ids, mode='train')
+            output = self.model(images=images, targets=reports_ids, mode='train')
+            a = 1/(batch_idx-5)
             loss = self.criterion(output, reports_ids, reports_masks)
             train_loss += loss.item()
             self.optimizer.zero_grad()

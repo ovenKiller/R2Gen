@@ -142,6 +142,5 @@ cython_debug/
 
 # Data
 data
-
 results
 log

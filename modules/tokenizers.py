@@ -10,8 +10,10 @@ class Tokenizer(object):
         self.dataset_name = args.dataset_name
         if self.dataset_name == 'iu_xray':
             self.clean_report = self.clean_report_iu_xray
-        else:
+        elif self.dataset_name == 'mimic_cxr':
             self.clean_report = self.clean_report_mimic_cxr
+        elif self.dataset_name == 'CT_RATE':
+            self.clean_report = self.clean_report_CT_RATE
         self.ann = json.loads(open(self.ann_path, 'r').read())
         self.token2idx, self.idx2token = self.create_vocabulary()
 
@@ -31,7 +33,8 @@ class Tokenizer(object):
             token2idx[token] = idx + 1
             idx2token[idx + 1] = token
         return token2idx, idx2token
-
+    def clean_report_CT_RATE(self, report):
+        return report
     def clean_report_iu_xray(self, report):
         report_cleaner = lambda t: t.replace('..', '.').replace('..', '.').replace('..', '.').replace('1. ', '') \
             .replace('. 2. ', '. ').replace('. 3. ', '. ').replace('. 4. ', '. ').replace('. 5. ', '. ') \
