@@ -81,7 +81,7 @@ def parse_agrs():
     # Others
     parser.add_argument('--seed', type=int, default=9233, help='.')
     parser.add_argument('--resume', type=str, help='whether to resume the training from existing checkpoints.')
-    parser.add_argument('--min_gpu_memory', type=int, default=0, help='the minimum gpu memory to be used.')
+    parser.add_argument('--min_gpu_memory', type=int, default=1000, help='the minimum gpu memory to be used.')
     args = parser.parse_args()
     return args
 

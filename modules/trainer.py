@@ -1,3 +1,4 @@
+import datetime
 import os
 from abc import abstractmethod
 from tqdm import tqdm  
@@ -6,16 +7,40 @@ import torch
 import pandas as pd
 from numpy import inf
 import GPUtil
+import logging
+import gc
+
+logger = logging.getLogger(__name__)
+if os.path.exists("logs") == False:
+    os.makedirs("logs")
+current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+logger.setLevel(logging.DEBUG)
+log_file = "logs/"+current_time+'.log'
+file_handler = logging.FileHandler(log_file)
+file_handler.setLevel(logging.WARNING)
+
+formatter = logging.Formatter('%(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(message)s')
+stream_handler.setFormatter(formatter)
+
+logger.addHandler(stream_handler)
 
 class BaseTrainer(object):
     def __init__(self, model, criterion, metric_ftns, optimizer, args):
         self.args = args
-
         # setup GPU device if available, move model into configured device
-        self.device, device_ids = self._prepare_device(args.n_gpu)
-        self.model = model.to(self.device)
-        if len(device_ids) > 1:
-            self.model = torch.nn.DataParallel(model, device_ids=device_ids)
+        self.device, self.avaliable_gpus = self._prepare_device(args.n_gpu)
+        self.origin_model = model.to(self.device)
+        if len(self.avaliable_gpus) > 1:
+            self.model = torch.nn.DataParallel(self.origin_model, device_ids=self.avaliable_gpus)
+        # 假设 self.model 是 DataParallel 包装的模型
+        for i, param in enumerate(self.model.parameters()):
+            logger.warning(f"Parameter {i} on device: {param.device}")
 
         self.criterion = criterion
         self.metric_ftns = metric_ftns
@@ -45,13 +70,48 @@ class BaseTrainer(object):
                               'test': {self.mnt_metric_test: self.mnt_best}}
 
     @abstractmethod
-    def _train_epoch(self, epoch):
+    def _train_epoch(self, epoch,device):
         raise NotImplementedError
 
     def train(self):
+        origin_retry_interval = 2
+        retry_interval = origin_retry_interval
         not_improved_count = 0
-        for epoch in range(self.start_epoch, self.epochs + 1):
-            result = self._train_epoch(epoch)
+        
+        epoch = self.start_epoch
+        while(epoch <= self.epochs):
+            result = None
+            try:
+                result = self._train_epoch(epoch,self.device)
+                # if flag is False and epoch ==5:
+                #     flag = True
+                #     a = 1/0
+                    
+            except Exception as e:
+                logger.error(f"Error in epoch {epoch},sleep for {retry_interval} seconds. {e}")
+                self._save_checkpoint(epoch, save_best=False)
+                del self.model
+                torch.cuda.empty_cache()
+                self.avaliable_gpus = []
+                while(len(self.avaliable_gpus) == 0):
+                    time.sleep(retry_interval)
+                    retry_interval = min(retry_interval * 2, 4)
+                    self.device, self.avaliable_gpus = self._prepare_device(self.args.n_gpu)
+                    logger.error(f"Retry to get device, current device: {self.device},avaliable_gpus: {self.avaliable_gpus}")
+                    if(len(self.avaliable_gpus) > 0):
+                        try:
+                            self._resume_checkpoint(os.path.join(self.checkpoint_dir, 'current_checkpoint.pth'))
+                            self.model = self.model.to(self.device)
+                            if len(self.avaliable_gpus) > 1:
+                                self.model = torch.nn.DataParallel(self.model, device_ids=self.avaliable_gpus).cuda()
+                        except Exception as e:
+                            logger.error(f"Resume failed: {e},sleep for {retry_interval} seconds")
+                            self.avaliable_gpus = []
+                retry_interval = origin_retry_interval
+                model_device = next(self.model.parameters()).device
+                logger.error(f"Resume success, current device: {model_device}")
+                continue
+                
             # save logged informations into log dict
             log = {'epoch': epoch}
             log.update(result)
@@ -87,6 +147,7 @@ class BaseTrainer(object):
 
             if epoch % self.save_period == 0:
                 self._save_checkpoint(epoch, save_best=best)
+            epoch += 1
         self._print_best()
         self._print_best_to_file()
 
@@ -111,26 +172,28 @@ class BaseTrainer(object):
         record_table.to_csv(record_path, index=False)
 
     def _prepare_device(self, n_gpu_use):
-        n_gpu = torch.cuda.device_count()
-        if n_gpu_use > 0 and n_gpu == 0:
-            print("Warning: There\'s no GPU available on this machine," "training will be performed on CPU.")
-            n_gpu_use = 0
-        if n_gpu_use > n_gpu:
-            print(
-                "Warning: The number of GPU\'s configured to use is {}, but only {} are available " "on this machine.".format(
-                    n_gpu_use, n_gpu))
-            n_gpu_use = n_gpu
-        device = torch.device('cuda:0' if n_gpu_use > 0 else 'cpu')
-        list_ids = list(range(n_gpu_use))
+        gpus = GPUtil.getGPUs()
+        min_memory = self.args.min_gpu_memory
+        list_ids = []
+        device = "cpu"
+        for index, gpu in enumerate(gpus):
+            logger.info(f"GPU {index}: {gpu.memoryFree}MB")
+            if gpu.memoryFree > min_memory:
+                list_ids.append(index)
+                if len(list_ids) == n_gpu_use:
+                    break
+        if len(list_ids) > 0:
+            device = torch.device('cuda:{}'.format(list_ids[0]))
         return device, list_ids
 
     def _save_checkpoint(self, epoch, save_best=False):
         state = {
             'epoch': epoch,
-            'state_dict': self.model.state_dict(),
+            'state_dict':self.model.module.state_dict() if isinstance(self.model, torch.nn.DataParallel) else self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'monitor_best': self.mnt_best
         }
+        
         filename = os.path.join(self.checkpoint_dir, 'current_checkpoint.pth')
         torch.save(state, filename)
         print("Saving checkpoint: {} ...".format(filename))
@@ -140,6 +203,7 @@ class BaseTrainer(object):
             print("Saving current best: model_best.pth ...")
 
     def _resume_checkpoint(self, resume_path):
+        self.model = self.origin_model
         resume_path = str(resume_path)
         print("Loading checkpoint: {} ...".format(resume_path))
         checkpoint = torch.load(resume_path)
@@ -183,13 +247,19 @@ class Trainer(BaseTrainer):
         self.val_dataloader = val_dataloader
         self.test_dataloader = test_dataloader
 
-    def _train_epoch(self, epoch):
+    def _train_epoch(self, epoch,device):
 
         train_loss = 0
         self.model.train()
+        exception_flag = False
         for batch_idx, (images_id, images, reports_ids, reports_masks) in enumerate(tqdm(self.train_dataloader, desc="Training")):
+            if exception_flag is False and batch_idx == 5:
+                exception_flag = True
+                a = 1/0
+            
             images, reports_ids, reports_masks = images.to(self.device), reports_ids.to(self.device), reports_masks.to(
                 self.device)
+            logger.error(f"self.device For Data: {device}")
             output = self.model(images, reports_ids, mode='train')
             loss = self.criterion(output, reports_ids, reports_masks)
             train_loss += loss.item()
